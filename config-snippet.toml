@@ -14,6 +14,8 @@ rows = [
 ]
 
 [ui.sidebar.spaces]
+# Keep dogs separated even when branch/git_status is absent. Set 0 for a compact list.
+row_gap = 1
 rows = [
   [{ token = "$doxie", rules = [{ contains = "\U0010F000", fg = "#f9e2af" }, { contains = "\U0010F002", fg = "#f9e2af" }, { contains = "\U0010F004", fg = "#f9e2af" }, { contains = "\U0010F006", fg = "#f38ba8" }, { contains = "\U0010F00A", fg = "#a6e3a1" }, { contains = "\U0010F00C", fg = "#a6e3a1" }, { contains = "\U0010F00E", fg = "#a6e3a1" }, { contains = "\U0010F010", fg = "#9399b2" }, { contains = "\U0010F020", fg = "#854d0e" }, { contains = "\U0010F022", fg = "#854d0e" }, { contains = "\U0010F024", fg = "#854d0e" }, { contains = "\U0010F026", fg = "#b91c1c" }, { contains = "\U0010F02A", fg = "#166534" }, { contains = "\U0010F02C", fg = "#166534" }, { contains = "\U0010F02E", fg = "#166534" }, { contains = "\U0010F030", fg = "#475569" }] }, "workspace"],
   ["branch", "git_status"],

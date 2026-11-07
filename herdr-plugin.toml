@@ -2,7 +2,7 @@ id = "herdr-doxie"
 name = "herdr-doxie"
 version = "0.1.0"
 min_herdr_version = "0.9.5"
-description = "Dachshund status icons with running and sleeping animations and terminal settings"
+description = "Animated dachshund status icons for Herdr agents and Spaces, with TUI controls for animations, speed, colors, and spacing."
 platforms = ["macos"]
 
 # A managed tab owns the foreground runner. No detached startup daemon.

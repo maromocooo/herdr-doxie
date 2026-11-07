@@ -4,9 +4,9 @@
 
 [English](README.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md)
 
-![奔跑的腊肠犬像素动画预览](assets/running.gif)
+![Herdr 侧边栏中运行的 Herdr Doxie](assets/herdr-doxie-demo.gif)
 
-这是像素图预览，不是终端截图。每只狗占两个终端字符单元。
+Herdr Doxie 在 Herdr 侧边栏中的实际运行效果。每只狗占两个终端字符单元。
 
 | 智能体状态 | 显示 |
 | --- | --- |
@@ -17,6 +17,8 @@
 | unknown | 静止的睡姿 |
 
 Spaces 按“等待输入 > 工作中 > 睡觉”的优先级汇总状态。没有智能体时显示空狗屋。完成状态是否已查看由各个 Herdr 客户端管理，因此 Spaces 将 done 视为 idle。
+
+Spaces 使用 `row_gap = 1` 在条目之间留一行空白，没有分支信息时也能保持间距。设置为 `0` 可恢复紧凑布局。留白会减少同时可见的条目数量；连续缩进的 worktree 子条目仍保持紧凑分组。Agents 的间距不变。
 
 ## 运行环境
 
@@ -87,6 +89,7 @@ python3 -c 'print(" ".join(chr(0x10F000+2*i)+chr(0x10F001+2*i) for i in range(9)
 - **Sleeping dog**：单独开关睡觉时的 z / zZ 动画。
 - **Running frame / Sleeping frame**：分别设置奔跑、睡觉的每帧时长。**时间越短，动画越快。** 默认分别为 0.25 / 0.7 秒，可选预设范围为 0.1–60 秒。
 - **Color theme**：Dark 使用浅色，Light 使用适合浅色背景的深色。设置界面的背景也会切换，但不会修改整个 Herdr 或终端的主题。
+- **Spaces spacing**：ON 在 Spaces 条目之间留一行空白，OFF 使用紧凑布局。与动画开关独立。
 
 关闭总开关不会丢失单独开关、速度和配色设置。同一设置文件由插件的各个会话共享，运行中的进程会重新读取。只调整设置而不启动另一个进程：
 
@@ -95,6 +98,8 @@ herdr plugin pane open --plugin herdr-doxie --entrypoint settings
 ```
 
 设置保存在 `herdr plugin config-dir herdr-doxie` 所指目录的 `settings.json` 中。独立运行时，默认为 `~/.config/herdr/plugins/config/herdr-doxie/settings.json`，支持 `XDG_CONFIG_HOME`；Herdr 提供的 `HERDR_PLUGIN_CONFIG_DIR` 优先。
+
+**Spaces spacing** 单独保存在 Herdr 的 `config.toml` 中。TUI 读取当前的 `ui.sidebar.spaces.row_gap`，通过 `herdr config check` 验证后，在同一目录创建仅当前用户可读写的 `.config.toml.doxie-backup-*` 备份，保存并请求重新加载。重新加载失败时保留已保存的值，并提示重试方法。优先使用 `HERDR_CONFIG_PATH`，否则使用 `herdr --help` 显示的配置路径。支持示例中的 `[ui.sidebar.spaces]` 表；带引号的表名或点分键等其他写法请手动修改。影响运行 TUI 的机器上使用该配置的会话；通过 SSH 查看时，请修改查看端的本地配置。worktree 子条目仍按 Herdr 的规则紧凑分组。
 
 环境变量优先于保存的设置：`HERDR_DOXIE_ANIMATE=0` 强制关闭动画；`HERDR_DOXIE_INTERVAL` 和 `HERDR_DOXIE_SLEEP_INTERVAL` 分别覆盖奔跑和睡觉的每帧时长（必须为 0.1–60 秒的有限数）。未设置时使用 TUI 保存的值。TUI 会提示生效的覆盖项；移除环境变量并重启进程后，才会恢复使用保存的值。`HERDR_SOCKET_PATH` 可指定目标服务器。
 

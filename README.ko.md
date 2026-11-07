@@ -4,9 +4,9 @@ Herdr 에이전트 상태에 맞춰 달리고, 앉고, 개집에 들어가고, �
 
 [English](README.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md)
 
-![달리는 닥스훈트 픽셀 애니메이션 미리보기](assets/running.gif)
+![Herdr 사이드바에서 움직이는 Herdr Doxie](assets/herdr-doxie-demo.gif)
 
-이 이미지는 픽셀 그림 미리보기이며 터미널 스크린샷이 아닙니다. 강아지 한 마리가 터미널의 두 문자 칸을 사용합니다.
+Herdr 사이드바에서 실제로 실행 중인 모습입니다. 강아지 한 마리가 터미널의 두 문자 칸을 사용합니다.
 
 | 에이전트 상태 | 표시 |
 | --- | --- |
@@ -17,6 +17,8 @@ Herdr 에이전트 상태에 맞춰 달리고, 앉고, 개집에 들어가고, �
 | unknown | 잠자는 정지 그림 |
 
 Spaces는 ‘입력 대기 > 작업 중 > 잠자기’ 순서로 에이전트 상태를 모읍니다. 에이전트가 없으면 빈 개집을 표시합니다. 완료 상태를 확인했는지는 Herdr 클라이언트별 정보이므로 Spaces에서는 done을 idle로 취급합니다.
+
+Spaces는 `row_gap = 1`로 항목 사이에 한 줄을 비워 브랜치 정보가 없어도 강아지 사이의 간격을 유지합니다. 더 촘촘하게 보려면 `0`으로 바꾸세요. 한 번에 보이는 항목 수는 줄어들며, 연속으로 들여쓰기된 worktree 하위 항목은 간격 없이 묶여 표시됩니다. Agents 간격은 바꾸지 않습니다.
 
 ## 요구 사항
 
@@ -87,6 +89,7 @@ python3 -c 'print(" ".join(chr(0x10F000+2*i)+chr(0x10F001+2*i) for i in range(9)
 - **Sleeping dog**: 잠자는 강아지의 z / zZ 애니메이션을 개별적으로 켜거나 끕니다.
 - **Running frame / Sleeping frame**: 달리기와 잠자기의 프레임 시간을 따로 조절합니다. **짧을수록 빠릅니다.** 기본값은 각각 0.25 / 0.7초이며, 0.1–60초 범위의 프리셋을 선택할 수 있습니다.
 - **Color theme**: Dark는 밝은 파스텔색, Light는 밝은 배경에 어울리는 진한 색을 사용합니다. 설정 화면의 배경도 바뀌지만 Herdr 전체나 터미널의 테마는 바꾸지 않습니다.
+- **Spaces spacing**: ON은 Spaces 항목 사이에 한 줄을 비우고, OFF는 촘촘하게 표시합니다. 애니메이션 스위치와 독립적입니다.
 
 전체 스위치를 꺼도 개별 스위치, 속도, 배색은 유지합니다. 설정 파일은 이 플러그인을 실행하는 세션 사이에 공유되며 실행 중인 프로세스가 다시 읽습니다. 새 실행 프로세스를 시작하지 않고 설정만 편집하려면:
 
@@ -95,6 +98,8 @@ herdr plugin pane open --plugin herdr-doxie --entrypoint settings
 ```
 
 설정은 `herdr plugin config-dir herdr-doxie`가 가리키는 폴더의 `settings.json`에 저장합니다. 직접 실행할 때는 `~/.config/herdr/plugins/config/herdr-doxie/settings.json`이 기본값이며 `XDG_CONFIG_HOME`을 지원합니다. Herdr가 제공하는 `HERDR_PLUGIN_CONFIG_DIR`가 우선합니다.
+
+**Spaces spacing**은 Herdr의 `config.toml`에 별도로 저장합니다. TUI는 현재 `ui.sidebar.spaces.row_gap`을 읽고, `herdr config check`로 검증한 다음 같은 폴더에 현재 사용자만 읽고 쓸 수 있는 `.config.toml.doxie-backup-*` 백업을 만들고 저장 및 다시 불러오기를 요청합니다. 다시 불러오기에 실패해도 저장값은 유지되며 재시도 방법을 표시합니다. `HERDR_CONFIG_PATH`를 우선하고, 없으면 `herdr --help`에 표시된 경로를 사용합니다. 예제의 `[ui.sidebar.spaces]` 테이블을 지원하며, 따옴표가 있는 테이블 이름이나 점으로 구분된 키 등 다른 형식은 직접 수정해야 합니다. TUI를 실행하는 머신에서 같은 설정을 쓰는 세션에 적용됩니다. SSH로 보는 경우에는 보는 쪽의 로컬 설정을 변경하세요. worktree 하위 항목은 Herdr 규칙에 따라 촘촘한 그룹으로 유지됩니다.
 
 환경 변수가 저장된 설정보다 우선합니다. `HERDR_DOXIE_ANIMATE=0`은 모든 애니메이션을 끄고, `HERDR_DOXIE_INTERVAL`과 `HERDR_DOXIE_SLEEP_INTERVAL`은 달리기와 잠자기의 프레임 시간을 덮어씁니다 (0.1–60초의 유한한 수). 지정하지 않으면 TUI의 저장값을 사용합니다. 적용 중인 환경 변수는 TUI에 표시됩니다. 저장값으로 돌아가려면 변수를 제거하고 실행 프로세스를 다시 시작하세요. `HERDR_SOCKET_PATH`로 대상 서버를 지정할 수 있습니다.
 

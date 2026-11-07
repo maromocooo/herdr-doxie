@@ -3,9 +3,9 @@
 herdr のエージェント状態を、走る・座る・犬小屋に入る・寝るダックスフンドで表示します。
 [English](README.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md)
 
-![走る犬のスプライトプレビュー](assets/running.gif)
+![Herdr のサイドバーで動く Herdr Doxie](assets/herdr-doxie-demo.gif)
 
-画像はスプライトのプレビューです。ターミナルのスクリーンショットではありません。
+Herdr のサイドバーで実際に動いている様子です。犬1匹はターミナルの2文字分で表示します。
 
 | 状態 | 表示 |
 | --- | --- |
@@ -16,6 +16,8 @@ herdr のエージェント状態を、走る・座る・犬小屋に入る・�
 | unknown | 寝る止め絵 |
 
 Spaces は「指示待ち > 動作中 > 寝る」の優先順です。エージェントがいなければ空の犬小屋になります。終了の既読状態はクライアントごとの情報なので、Spaces では done を idle として扱います。
+
+Spaces は `row_gap = 1` で項目間に1行の余白を入れ、ブランチ情報がない項目でも犬同士の間隔を保ちます。詰めて表示したい場合は `0` に戻せます。一度に表示できる項目数は減ります。連続するインデント付き worktree 子項目はまとまった表示のままです。Agents の間隔は変更しません。
 
 ## 動作環境
 
@@ -84,6 +86,7 @@ python3 -c 'print(" ".join(chr(0x10F000+2*i)+chr(0x10F001+2*i) for i in range(9)
 - **Sleeping dog**: 寝ている犬の z / zZ だけ切り替えます。
 - **Running frame / Sleeping frame**: 走る・寝るの1コマの時間を別々に調整します。短いほど速く、既定は 0.25 / 0.7 秒。0.1〜60 秒のプリセットから選べます。
 - **Color theme**: Dark は淡い色、Light は明るい背景で見やすい濃い色です。設定画面の背景も切り替わります。herdr 全体やターミナルのテーマは変更しません。
+- **Spaces spacing**: ON で Spaces の項目間に1行の余白、OFF で詰めた表示にします。アニメーションの設定とは独立しています。
 
 全体をオフにしても個別のオン／オフ、速度、配色は保持します。設定はプラグイン全体で共有し、各セッションの実行中プロセスが読み直します。操作タブとは別に、設定だけのポップアップも開けます。
 
@@ -92,6 +95,8 @@ herdr plugin pane open --plugin herdr-doxie --entrypoint settings
 ```
 
 保存先は `herdr plugin config-dir herdr-doxie` が示すフォルダの `settings.json` です。直接スクリプトを実行する場合は `~/.config/herdr/plugins/config/herdr-doxie/settings.json`（`XDG_CONFIG_HOME` に対応）。`HERDR_PLUGIN_CONFIG_DIR` があれば優先します。
+
+**Spaces spacing** だけはアニメーション設定と別に Herdr の `config.toml` に保存します。現在の `ui.sidebar.spaces.row_gap` を読み、変更を `herdr config check` で検証してから、同じフォルダに非公開権限の `.config.toml.doxie-backup-*` を作成して保存・再読み込みします。再読み込みに失敗しても保存値は残り、TUI に再実行方法を表示します。`HERDR_CONFIG_PATH` があれば優先し、なければ `herdr --help` の設定パスを使います。設定例の `[ui.sidebar.spaces]` テーブルに対応しています。引用符付きテーブル名やドット付きキーなど別の書式は手動で変更してください。TUI を実行するマシンで同じ設定ファイルを使うセッションに影響します。SSH 経由で表示する場合は閲覧側のローカル設定を変更してください。worktree 子項目のまとまりは Herdr の仕様どおり詰めた表示です。
 
 環境変数 `HERDR_DOXIE_ANIMATE=0` は全アニメーションを停止し、`HERDR_DOXIE_INTERVAL` と `HERDR_DOXIE_SLEEP_INTERVAL` は保存した速度より優先します。未指定なら TUI の設定値を使います（初期値 0.25 / 0.7 秒）。有効な上書きは TUI に表示します。保存値に戻すには環境変数を外して処理を再起動します。速度は 0.1〜60 秒の有限数です。
 

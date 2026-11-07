@@ -3,9 +3,9 @@
 Dachshunds that run, sit, go home and sleep with your Herdr agents.
 [English](README.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md)
 
-![Running dachshund sprite preview](assets/running.gif)
+![Herdr Doxie running in the Herdr sidebar](assets/herdr-doxie-demo.gif)
 
-This is a sprite preview, not a terminal screenshot. The font uses two terminal cells per dog.
+Herdr Doxie in action in the Herdr sidebar. The font uses two terminal cells per dog.
 
 | Agent state | Dog |
 | --- | --- |
@@ -16,6 +16,8 @@ This is a sprite preview, not a terminal screenshot. The font uses two terminal 
 | Unknown | Static sleeping dog |
 
 Spaces aggregate their agents: blocked > working > sleeping. Empty Spaces show an empty house. Done is treated as idle in Spaces because viewed/unviewed state belongs to each Herdr client.
+
+Spaces use `row_gap = 1` to leave one blank line between entries, including those without branch information. Set it to `0` for a denser list. This reduces the number of entries visible at once; consecutive indented worktree children remain grouped without gaps. Agents keep their existing spacing.
 
 ## Requirements
 
@@ -77,7 +79,7 @@ Check the font (nine dogs):
 python3 -c 'print(" ".join(chr(0x10F000+2*i)+chr(0x10F001+2*i) for i in range(9)))'
 ```
 
-## Animation settings
+## TUI settings
 
 Use Up/Down to select and Left/Right to change a value in the control tab. Space/Enter toggles switches or increases frame duration. Changes save immediately and apply to live runners:
 
@@ -86,6 +88,7 @@ Use Up/Down to select and Left/Right to change a value in the control tab. Space
 - **Sleeping dog**: independently enable/disable the z / zZ frames.
 - **Running frame** / **Sleeping frame**: independent frame durations. Shorter means faster. Defaults: 0.25 / 0.7 seconds; presets span 0.1–60 seconds.
 - **Color theme**: Dark (pastel dogs) or Light (darker dogs). Also changes the settings screen background. It does not change Herdr's overall theme or your terminal theme.
+- **Spaces spacing**: ON inserts one blank row between Spaces; OFF uses a compact list. Independent of the animation switches.
 
 Turning the master switch off preserves individual switches, speeds and theme. Settings are shared across sessions for this plugin and live runners reload them. To edit without starting another runner:
 
@@ -94,6 +97,8 @@ herdr plugin pane open --plugin herdr-doxie --entrypoint settings
 ```
 
 Settings are stored in `settings.json` under `herdr plugin config-dir herdr-doxie`. Standalone execution uses `$XDG_CONFIG_HOME/herdr/plugins/config/herdr-doxie` (default `~/.config/herdr/plugins/config/herdr-doxie`). A `HERDR_PLUGIN_CONFIG_DIR` supplied by Herdr takes precedence.
+
+**Spaces spacing** is stored in Herdr’s `config.toml`, separately from animation preferences. The TUI reads its current `ui.sidebar.spaces.row_gap`, validates changes with `herdr config check`, saves a private `.config.toml.doxie-backup-*` beside the config, then requests a reload. If reload fails, the saved value remains and the TUI shows how to retry. It honors `HERDR_CONFIG_PATH`; otherwise it uses the path reported by `herdr --help`. Use the `[ui.sidebar.spaces]` table from the snippet; alternative quoted or dotted-key layouts must be edited manually. This affects sessions using that config on the machine running the TUI. For SSH viewing, adjust the viewing client’s local config. Worktree child groups keep Herdr’s compact spacing.
 
 Optional environment overrides take precedence over saved preferences. The TUI identifies active overrides; remove them and restart the runner to use saved speeds:
 

@@ -43,9 +43,92 @@ class Tests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.env = patch.dict(os.environ, {'XDG_RUNTIME_DIR': self.tmp.name,
             'HERDR_PLUGIN_CONFIG_DIR': self.tmp.name, 'HERDR_SOCKET_PATH': self.tmp.name + '/herdr.sock',
+            'HERDR_CONFIG_PATH': self.tmp.name + '/config.toml',
             'HERDR_DOXIE_ANIMATE': '1'})
         self.env.start()
         self.addCleanup(self.env.stop)
+        Path(os.environ['HERDR_CONFIG_PATH']).write_text('[ui.sidebar.spaces]\nrows = [["workspace"]]\n')
+
+    def test_spacing_preserves_comments_arrays_strings_and_other_tables(self):
+        source = ('onboarding = false\n# [ui.sidebar.spaces]\n'
+                  '[ui.sidebar.agents]\nrow_gap = 2\n'
+                  '[ui.sidebar.spaces] # keep\nrows = [\n ["workspace"],\n ["branch"]\n]\n'
+                  '  row_gap = 0 # compact\n[terminal]\ndefault_shell = "zsh"\n')
+        current, updated = d.space_gap_config(source, 1)
+        self.assertEqual(current, 0)
+        self.assertEqual(updated, source.replace('row_gap = 0 # compact', 'row_gap = 1 # compact'))
+        self.assertEqual(d.space_gap_config(updated, 0)[1], source)
+        # Table-looking text inside multiline strings and arrays is never a table.
+        for quote in ('"""', "'''"):
+            text = 'example = ' + quote + '\n[ui.sidebar.spaces]\nrow_gap = 9\n' + quote + '\n'
+            with self.assertRaises(ValueError): d.space_gap_config(text, 1)
+            self.assertEqual(d.space_gap_config(text + source, 1)[1], text + updated)
+        for ending in ('\n', '\r\n', ''):
+            text = '[ui.sidebar.spaces]' + ending
+            self.assertIn('row_gap = 1', d.space_gap_config(text, 1)[1])
+        with self.assertRaises(ValueError): d.space_gap_config('[ui.sidebar.spaces]\n'*2, 1)
+
+    def test_spacing_validates_backs_up_preserves_symlinks_and_reloads(self):
+        if not shutil.which('herdr'): self.skipTest('Herdr CLI not installed')
+        path = d.herdr_config_path()
+        source = (ROOT/'config-snippet.toml').read_bytes()
+        path.write_bytes(source)
+        path.chmod(0o640)
+        link = path.with_name('linked.toml'); link.symlink_to(path)
+        with patch.object(d.Api, 'call', return_value={}) as call:
+            gap, notice = d.toggle_space_gap(link)
+        self.assertEqual(gap, 0)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+        self.assertIn('reloaded', notice)
+        call.assert_called_once_with('server.reload_config', {})
+        backups = list(path.parent.glob('.config.toml.doxie-backup-*'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), source)
+        self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+        self.assertEqual(d.read_space_gap(path), 0)
+        with patch.object(d.Api, 'call', side_effect=ConnectionError('offline')):
+            gap, notice = d.toggle_space_gap(path)
+        self.assertEqual(gap, 1)
+        self.assertIn('Saved; reload failed', notice)
+        self.assertEqual(path.read_bytes(), source)
+
+    def test_spacing_rejected_or_concurrent_config_never_overwritten(self):
+        path = d.herdr_config_path(); source = path.read_bytes()
+        rejected = subprocess.CompletedProcess([], 0, 'config: invalid', '')
+        with patch.object(d.subprocess, 'run', return_value=rejected), patch.object(d.Api, 'call') as call:
+            with self.assertRaisesRegex(ValueError, 'rejected'): d.toggle_space_gap(path)
+            call.assert_not_called()
+        self.assertEqual(path.read_bytes(), source)
+        def validate(*args, **kwargs):
+            path.write_bytes(source + b'# external edit\n')
+            return subprocess.CompletedProcess([], 0, 'config: ok\n', '')
+        with patch.object(d.subprocess, 'run', side_effect=validate):
+            with self.assertRaisesRegex(ValueError, 'changed'): d.toggle_space_gap(path)
+        self.assertEqual(path.read_bytes(), source + b'# external edit\n')
+        self.assertFalse(list(path.parent.glob('.doxie-config-*')))
+        self.assertFalse(list(path.parent.glob('.config.toml.doxie-backup-*')))
+
+    def test_spacing_tui_toggle_is_independent_of_animation_preferences(self):
+        class Screen:
+            def __init__(self):
+                self.keys = iter([ord('k'), 32, ord('q')])
+                self.lines = []
+            def timeout(self, *a): pass
+            def erase(self): pass
+            def getmaxyx(self): return (12, 100)
+            def addnstr(self, y, x, text, width): self.lines.append(text)
+            def refresh(self): pass
+            def getch(self): return next(self.keys)
+        screen = Screen()
+        valid = subprocess.CompletedProcess([], 0, 'config: ok\n', '')
+        with patch.object(d.curses, 'curs_set'), patch.object(d, 'ui_theme'), \
+             patch.object(d.subprocess, 'run', return_value=valid), patch.object(d.Api, 'call'):
+            d.settings_ui(screen, threading.Event(), ['Settings'])
+        self.assertEqual(d.read_space_gap(d.herdr_config_path()), 1)
+        self.assertEqual(d.read_settings(), d.DEFAULTS)
+        self.assertFalse(d.settings_path().exists())
+        self.assertTrue(any('Spaces spacing: ON' in line for line in screen.lines))
 
     def test_bundled_font_names_and_checksum(self):
         data=(ROOT/'HerdrDoxie.ttf').read_bytes()

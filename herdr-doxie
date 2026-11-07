@@ -8,9 +8,11 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import select
 import signal
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -93,6 +95,97 @@ def save_settings(settings):
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+def herdr_config_path():
+    # Ask the installed CLI: named sessions and XDG defaults must match Herdr.
+    if os.environ.get("HERDR_CONFIG_PATH"):
+        return Path(os.environ["HERDR_CONFIG_PATH"]).resolve()
+    result = subprocess.run(["herdr", "--help"], capture_output=True, text=True, timeout=5)
+    match = re.search(r"^Config: (.+)$", result.stdout, re.MULTILINE)
+    if result.returncode or not match:
+        raise ValueError("Cannot locate Herdr config; set HERDR_CONFIG_PATH")
+    return Path(match[1]).resolve()
+
+
+def space_gap_config(text, gap=None):
+    """Locate a bare Spaces table without interpreting strings as TOML syntax.
+
+    Keep every byte except the integer (or one inserted line). Herdr itself
+    validates TOML before any write. Quoted/dotted alternative layouts are
+    deliberately not rewritten; use the table from config-snippet.toml.
+    """
+    if gap is not None and (type(gap) is not int or gap not in (0, 1)):
+        raise ValueError("Spaces spacing must be 0 or 1")
+    strings = r'''"""(?:[^"\\]|\\.|"(?!""))*"""|''' + "'''[\\s\\S]*?'''" + r'''|"(?:[^"\\\n]|\\.)*"|'[^'\n]*'|\#[^\n]*'''
+    masked = re.sub(strings, lambda m: re.sub(r"[^\r\n]", " ", m[0]), text, flags=re.DOTALL)
+    depth, offset, header, value = 0, 0, None, None
+    in_spaces = False
+    for line in masked.splitlines(keepends=True):
+        if depth == 0 and line.lstrip().startswith("["):
+            in_spaces = bool(re.fullmatch(r"[ \t]*\[[ \t]*ui[ \t]*\.[ \t]*sidebar[ \t]*\.[ \t]*spaces[ \t]*\][ \t\r\n]*", line))
+            if in_spaces:
+                if header is not None:
+                    raise ValueError("Duplicate Spaces table")
+                header = offset + len(line)
+        else:
+            if depth == 0 and in_spaces:
+                match = re.fullmatch(r"[ \t]*row_gap[ \t]*=[ \t]*(\+?[0-9][0-9_]*)[ \t\r\n]*", line)
+                if match:
+                    if value is not None:
+                        raise ValueError("Duplicate row_gap")
+                    value = (offset + match.start(1), offset + match.end(1), int(match[1].replace("_", "")))
+            depth += sum(line.count(c) for c in "[{") - sum(line.count(c) for c in "]}")
+        offset += len(line)
+    if header is None:
+        raise ValueError("Use [ui.sidebar.spaces] from config-snippet.toml first")
+    current = value[2] if value else 0
+    if gap is None or current == gap:
+        return current, text
+    if value:
+        return current, text[:value[0]] + str(gap) + text[value[1]:]
+    newline = "\r\n" if "\r\n" in text else "\n"
+    separator = "" if text[:header].endswith("\n") else newline
+    return current, text[:header] + separator + f"row_gap = {gap}" + newline + text[header:]
+
+
+def read_space_gap(path):
+    return space_gap_config(path.read_bytes().decode("utf-8"))[0]
+
+
+def toggle_space_gap(path):
+    path = path.resolve()  # Preserve symlinks used by dotfile managers.
+    original = path.read_bytes()
+    current = space_gap_config(original.decode("utf-8"))[0]
+    gap = 0 if current else 1
+    updated = space_gap_config(original.decode("utf-8"), gap)[1].encode("utf-8")
+    fd, name = tempfile.mkstemp(prefix=".doxie-config-", suffix=".toml", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(updated)
+        result = subprocess.run(["herdr", "config", "check"], capture_output=True, text=True,
+                                env={**os.environ, "HERDR_CONFIG_PATH": name}, timeout=5)
+        # Herdr 0.9.5 may exit zero even when validation fails.
+        if result.returncode or result.stdout.strip() != "config: ok":
+            raise ValueError("Herdr rejected config; run herdr config check. Nothing saved.")
+        mode = path.stat().st_mode & 0o777
+        if path.read_bytes() != original:
+            raise ValueError("Config changed while saving; try again")
+        backup_fd, backup = tempfile.mkstemp(prefix=f".{path.name}.doxie-backup-", dir=path.parent)
+        with os.fdopen(backup_fd, "wb") as f:
+            f.write(original)
+        os.chmod(name, mode)
+        if path.read_bytes() != original:
+            raise ValueError("Config changed while saving; try again")
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+    try:
+        Api().call("server.reload_config", {})
+    except (OSError, ValueError, RuntimeError):
+        return gap, "Saved; reload failed. Run: herdr server reload-config"
+    return gap, "Saved; Herdr reloaded. Backup beside config.toml."
 
 
 def interval(name, default):
@@ -447,9 +540,15 @@ def ui_theme(stdscr, theme):
 def settings_ui(stdscr, stop, status):
     settings = read_settings()
     selected = 0
-    keys = list(DEFAULTS)
+    keys = list(DEFAULTS) + ["space_gap"]
     names = ["All animations", "Running dog", "Sleeping dog (z / zZ)",
-             "Running frame", "Sleeping frame", "Color theme"]
+             "Running frame", "Sleeping frame", "Color theme", "Spaces spacing"]
+    config_path, gap, gap_error = None, None, ""
+    try:
+        config_path = herdr_config_path()
+        gap = read_space_gap(config_path)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        gap_error = str(error)
     stdscr.timeout(200)
     try:
         curses.curs_set(0)
@@ -461,8 +560,10 @@ def settings_ui(stdscr, stop, status):
         stdscr.erase()
         lines = ["Herdr Doxie", "", status[0], ""]
         for i, key in enumerate(keys):
-            value = settings[key]
-            if key in TOGGLES:
+            value = gap if key == "space_gap" else settings[key]
+            if key == "space_gap":
+                display = "unavailable" if value is None else (f"ON ({value} blank row{'s' if value != 1 else ''})" if value else "OFF (compact)")
+            elif key in TOGGLES:
                 display = "ON" if value else "OFF"
             elif key.endswith("_interval"):
                 display = f"{value:g} s / frame"
@@ -473,8 +574,9 @@ def settings_ui(stdscr, stop, status):
             if (override and override in os.environ) or (key == "animate" and os.environ.get("HERDR_DOXIE_ANIMATE") == "0"):
                 suffix += " (environment override)"
             lines.append(f"{'>' if selected == i else ' '} {names[i]}: {display}{suffix}")
+        hint = (gap_error or "Spaces spacing edits Herdr config; backup + reload.") if keys[selected] == "space_gap" else notice
         lines += ["", "Up/Down: select   Left/Right: change", "Space/Enter: toggle or increase frame duration",
-                  "Shorter frame duration = faster animation.", "q: close (panel also stops the dog)", "", notice]
+                  "Shorter frame duration = faster animation.", "q: close (panel also stops the dog)", "", hint, notice]
         overrides = [k for k in ("HERDR_DOXIE_INTERVAL", "HERDR_DOXIE_SLEEP_INTERVAL") if k in os.environ]
         if os.environ.get("HERDR_DOXIE_ANIMATE") == "0":
             overrides.append("HERDR_DOXIE_ANIMATE")
@@ -484,7 +586,7 @@ def settings_ui(stdscr, stop, status):
         height, width = stdscr.getmaxyx()
         # Keep the selected row and controls visible in a short popup.
         if height < len(lines) + 1:
-            lines = ["Herdr Doxie", lines[4 + selected], "Up/Down: select; Left/Right: change; q: close", notice]
+            lines = ["Herdr Doxie", lines[4 + selected], "Up/Down: select; Left/Right/Space: change; q: close", hint, notice]
         for y, line in enumerate(lines[:max(0, height - 1)]):
             try:
                 stdscr.addnstr(y, 0, line, max(0, width - 1))
@@ -500,12 +602,17 @@ def settings_ui(stdscr, stop, status):
             selected = (selected + 1) % len(keys)
         if key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord('h'), ord('l'), ord(' '), 10, 13, curses.KEY_ENTER):
             try:
+                if keys[selected] == "space_gap":
+                    config_path = config_path or herdr_config_path()
+                    gap, notice = toggle_space_gap(config_path)
+                    gap_error = ""
+                    continue
                 direction = -1 if key in (curses.KEY_LEFT, ord('h')) else 1
                 updated = adjust_setting(read_settings(), keys[selected], direction)
                 save_settings(updated)
                 settings = updated
                 notice = "Saved."
-            except (OSError, ValueError) as error:
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
                 notice = f"Could not save: {error}"
 
 
