@@ -1,0 +1,29 @@
+id = "herdr-doxie"
+name = "herdr-doxie"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+description = "Dachshund status icons with running and sleeping animations and terminal settings"
+platforms = ["macos"]
+
+# A managed tab owns the foreground runner. No detached startup daemon.
+[[panes]]
+id = "control"
+title = "Doxie settings"
+placement = "tab"
+command = ["python3", "herdr-doxie", "--panel"]
+
+[[panes]]
+id = "settings"
+title = "Doxie settings (existing runner)"
+placement = "popup"
+command = ["python3", "herdr-doxie", "--settings"]
+
+[[actions]]
+id = "clear"
+title = "Stop Doxie and clear icons"
+command = ["python3", "herdr-doxie", "--clear"]
+
+[[actions]]
+id = "once"
+title = "Show static Doxie icons for 60 seconds"
+command = ["python3", "herdr-doxie", "--once"]

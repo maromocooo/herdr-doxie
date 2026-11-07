@@ -1,0 +1,4 @@
+# Runtime uses Python's standard library only.
+Pillow>=10
+fonttools>=4.50
+skia-pathops>=0.8

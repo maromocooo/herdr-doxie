@@ -1,0 +1,572 @@
+#!/usr/bin/env python3
+"""Dachshund status icons for Herdr. Python 3.9+, macOS, Herdr 0.9.5+."""
+import argparse
+import curses
+import fcntl
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import select
+import signal
+import socket
+import sys
+import tempfile
+import threading
+import time
+import zlib
+
+SOURCE = "user:herdr-doxie"
+BASE = 0x10F000
+TTL_MS = 60000
+REFRESH_SEC = 20
+SCAN_SEC = 2
+MAX_MESSAGE = 4 * 1024 * 1024
+DEFAULTS = {"animate": True, "running": True, "sleeping": True,
+            "run_interval": 0.25, "sleep_interval": 0.7, "theme": "dark"}
+TOGGLES = ("animate", "running", "sleeping")
+LIGHT_OFFSET = 0x20
+SPEEDS = (0.1, 0.15, 0.2, 0.25, 0.35, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 30.0, 60.0)
+
+
+def icon(i):
+    return chr(BASE + 2 * i) + chr(BASE + 2 * i + 1)
+
+
+RUN = [icon(0), icon(1), icon(2), icon(1)]
+SIT, HOUSE = icon(3), icon(4)
+SLEEP = [icon(6), icon(5), icon(7)]
+SLEEP_STILL, HOUSE_EMPTY = icon(5), icon(8)
+
+
+def socket_path():
+    if os.environ.get("HERDR_SOCKET_PATH"):
+        return os.path.abspath(os.environ["HERDR_SOCKET_PATH"])
+    base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "herdr"
+    session = os.environ.get("HERDR_SESSION", "default")
+    if session != "default":
+        base = base / "sessions" / session
+    return str(base / "herdr.sock")
+
+
+def settings_path():
+    base = os.environ.get("HERDR_PLUGIN_CONFIG_DIR")
+    if not base:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "herdr/plugins/config/herdr-doxie"
+    return Path(base) / "settings.json"
+
+
+def read_settings():
+    try:
+        data = json.loads(settings_path().read_text())
+    except FileNotFoundError:
+        return DEFAULTS.copy()
+    return validate_settings(data)
+
+
+def validate_settings(data):
+    if not isinstance(data, dict):
+        raise ValueError("settings.json must be an object")
+    result = {k: data.get(k, v) for k, v in DEFAULTS.items()}
+    if any(type(result[k]) is not bool for k in TOGGLES):
+        raise ValueError("animate, running and sleeping must be booleans")
+    for key in ("run_interval", "sleep_interval"):
+        value = result[key]
+        if type(value) not in (int, float) or not math.isfinite(value) or not 0.1 <= value <= 60:
+            raise ValueError(f"{key} must be a finite number between 0.1 and 60 seconds")
+    if result["theme"] not in ("dark", "light"):
+        raise ValueError("theme must be dark or light")
+    return result
+
+
+def save_settings(settings):
+    settings = validate_settings(settings)
+    path = settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".settings-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(settings, f, indent=2)
+            f.write("\n")
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def interval(name, default):
+    try:
+        value = float(os.environ.get(name, default))
+    except ValueError:
+        raise ValueError(f"{name} must be a finite number between 0.1 and 60 seconds") from None
+    if not math.isfinite(value) or not 0.1 <= value <= 60:
+        raise ValueError(f"{name} must be a finite number between 0.1 and 60 seconds")
+    return value
+
+
+class ApiError(RuntimeError):
+    def __init__(self, code, message):
+        self.code = code
+        super().__init__(f"{code}: {message}")
+
+
+class NotFound(ApiError):
+    pass
+
+
+def checked(response):
+    err = response.get("error")
+    if err:
+        code = err.get("code", "unknown")
+        cls = NotFound if code in ("not_found", "pane_not_found", "workspace_not_found") else ApiError
+        raise cls(code, err.get("message", ""))
+    return response
+
+
+def read_line(sock):
+    data = bytearray()
+    # Read exactly one line: leave queued subscription events in the socket.
+    while not data.endswith(b"\n"):
+        chunk = sock.recv(1)
+        if not chunk:
+            raise ConnectionError("Herdr connection closed")
+        data.extend(chunk)
+        if len(data) > MAX_MESSAGE:
+            raise ValueError("Herdr response exceeds size limit")
+    return checked(json.loads(data))
+
+
+class Api:
+    """Unix socket API. Semantic errors never trigger expensive CLI retries."""
+    def __init__(self):
+        self.path = socket_path()
+        self.seq = 0
+
+    def call(self, method, params, cli_args=None):
+        self.seq += 1
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(2)
+            s.connect(self.path)
+            s.sendall((json.dumps({"id": str(self.seq), "method": method, "params": params}) + "\n").encode())
+            # Requests use their own connection, so a buffered reader is safe.
+            with s.makefile("rb") as f:
+                line = f.readline(MAX_MESSAGE + 1)
+                if not line:
+                    raise ConnectionError("Herdr connection closed")
+                if len(line) > MAX_MESSAGE or not line.endswith(b"\n"):
+                    raise ValueError("Invalid or oversized Herdr response")
+                return checked(json.loads(line))
+
+    def agents(self):
+        """{pane_id: (status, workspace_id)}。応答の形が多少変わっても拾えるよう再帰的に探す。"""
+        found = {}
+
+        def walk(o):
+            if isinstance(o, dict):
+                pane = o.get("pane_id")
+                status = o.get("agent_status") or o.get("status") or o.get("state")
+                if isinstance(pane, str) and isinstance(status, str):
+                    ws = o.get("workspace_id")
+                    if not isinstance(ws, str):
+                        ws = pane.split(":", 1)[0]  # ペイン ID は "w1:p2" のようにワークスペース ID を含む
+                    found[pane] = (status, ws)
+                    return
+                for v in o.values():
+                    walk(v)
+            elif isinstance(o, list):
+                for v in o:
+                    walk(v)
+
+        walk(self.call("agent.list", {}, ["agent", "list"]))
+        return found
+
+    def panes(self):
+        found = set()
+
+        def walk(o):
+            if isinstance(o, dict):
+                if isinstance(o.get("pane_id"), str):
+                    found.add(o["pane_id"])
+                for v in o.values():
+                    walk(v)
+            elif isinstance(o, list):
+                for v in o:
+                    walk(v)
+
+        walk(self.call("pane.list", {}, ["pane", "list"]))
+        return found
+
+    def workspaces(self):
+        found = set()
+
+        def walk(o):
+            if isinstance(o, dict):
+                if isinstance(o.get("workspace_id"), str):
+                    found.add(o["workspace_id"])
+                for v in o.values():
+                    walk(v)
+            elif isinstance(o, list):
+                for v in o:
+                    walk(v)
+
+        walk(self.call("workspace.list", {}, ["workspace", "list"]))
+        return found
+
+    def report(self, pane, labels):
+        self.call("pane.report_metadata", {"pane_id": pane, "source": SOURCE,
+                  "state_labels": labels, "ttl_ms": TTL_MS})
+
+    def report_space(self, ws, text):
+        self.call("workspace.report_metadata", {"workspace_id": ws, "source": SOURCE,
+                  "tokens": {"doxie": text}, "ttl_ms": TTL_MS})
+
+    def clear(self, pane):
+        self.call("pane.report_metadata", {"pane_id": pane, "source": SOURCE, "clear_state_labels": True})
+
+    def clear_space(self, ws):
+        self.call("workspace.report_metadata", {"workspace_id": ws, "source": SOURCE, "tokens": {"doxie": None}})
+
+
+class Events:
+    """Connection lifetime is the server lifetime; events invalidate our cache."""
+    TYPES = ("pane.created", "pane.closed", "pane.moved", "pane.exited",
+             "pane.agent_detected", "workspace.created", "workspace.closed")
+
+    def __init__(self, path):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.buffer = b""
+        try:
+            self.sock.settimeout(2)
+            self.sock.connect(path)
+            request = {"id": "doxie-events", "method": "events.subscribe",
+                       "params": {"subscriptions": [{"type": t} for t in self.TYPES]}}
+            self.sock.sendall((json.dumps(request) + "\n").encode())
+            response = read_line(self.sock)
+            if response.get("result", {}).get("type") != "subscription_started":
+                raise ValueError("Herdr did not acknowledge the event subscription")
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        self.sock.close()
+
+    def wait(self, timeout):
+        if not select.select([self.sock], [], [], timeout)[0]:
+            return False
+        chunk = self.sock.recv(65536)
+        if not chunk:
+            raise ConnectionError("Herdr event stream closed; stopping")
+        self.buffer += chunk
+        if len(self.buffer) > MAX_MESSAGE:
+            raise ValueError("Herdr event exceeds size limit")
+        dirty = False
+        while b"\n" in self.buffer:
+            line, self.buffer = self.buffer.split(b"\n", 1)
+            checked(json.loads(line))
+            dirty = True
+        return dirty
+
+
+def offset(key):
+    return zlib.crc32(key.encode())
+
+
+def themed(text, settings):
+    if settings.get("theme", "dark") == "light":
+        return "".join(chr(ord(c) + LIGHT_OFFSET) for c in text)
+    return text
+
+
+def effective_intervals(settings):
+    return (interval("HERDR_DOXIE_INTERVAL", settings["run_interval"]),
+            interval("HERDR_DOXIE_SLEEP_INTERVAL", settings["sleep_interval"]))
+
+
+def labels_for(key, elapsed, settings, run_interval=0.25, sleep_interval=0.7):
+    enabled = settings["animate"] and os.environ.get("HERDR_DOXIE_ANIMATE", "1") != "0"
+    run = RUN[(int(elapsed / run_interval) + offset(key)) % len(RUN)] if enabled and settings["running"] else RUN[0]
+    sleep = SLEEP[(int(elapsed / sleep_interval) + offset(key)) % len(SLEEP)] if enabled and settings["sleeping"] else SLEEP_STILL
+    labels = {"working": run, "blocked": SIT, "done": HOUSE, "idle": sleep, "unknown": SLEEP_STILL}
+    return {state: themed(text, settings) for state, text in labels.items()}
+
+
+def space_icon(ws, statuses, elapsed, settings, run_interval=0.25, sleep_interval=0.7):
+    if not statuses:
+        return themed(HOUSE_EMPTY, settings)
+    statuses = {"idle" if s == "done" else s for s in statuses}
+    top = next((s for s in ("blocked", "working", "idle", "unknown") if s in statuses), "unknown")
+    return labels_for(ws, elapsed, settings, run_interval, sleep_interval)[top]
+
+
+class Instance:
+    """Cooperative stop under a per-endpoint lock. Never signal an unverified PID."""
+    def __init__(self):
+        base = Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()) / f"herdr-doxie-{os.getuid()}"
+        base.mkdir(mode=0o700, exist_ok=True)
+        if base.is_symlink() or base.stat().st_uid != os.getuid() or base.stat().st_mode & 0o077:
+            raise RuntimeError(f"Unsafe runtime directory: {base}")
+        key = hashlib.sha256(os.path.realpath(socket_path()).encode()).hexdigest()[:24]
+        self.stop_path = base / (key + ".stop")
+        self.fd = os.open(base / (key + ".lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+
+    def acquire(self):
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            return False
+
+    def stop_and_acquire(self):
+        if self.acquire():
+            return
+        self.stop_path.touch(mode=0o600)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            if self.acquire():
+                return
+            time.sleep(0.05)
+        raise RuntimeError("Runner did not stop within 8 seconds; nothing was cleared")
+
+    def close(self):
+        os.close(self.fd)
+
+
+class Renderer:
+    def __init__(self, api):
+        self.api = api
+        self.panes, self.spaces, self.agents = set(), set(), {}
+        self.sent = {}
+
+    def scan(self):
+        # Commit the snapshot only after all reads succeed.
+        agents = self.api.agents()
+        panes = self.api.panes() | set(agents)
+        spaces = self.api.workspaces() | {ws for _, ws in agents.values()}
+        self.agents, self.panes, self.spaces = agents, panes, spaces
+        self.sent = {key: v for key, v in self.sent.items()
+                     if key[1] in (panes if key[0] == "pane" else spaces)}
+
+    def render(self, now, settings, run_interval, sleep_interval):
+        by_space = {}
+        for status, ws in self.agents.values():
+            by_space.setdefault(ws, set()).add(status)
+        for pane in self.panes:
+            labels = labels_for(pane, now, settings, run_interval, sleep_interval)
+            status = self.agents.get(pane, ("unknown", None))[0]
+            # Cache the visible frame, but always send all state labels.
+            self.send(("pane", pane), (status, labels.get(status), tuple(settings.values())), now,
+                      lambda p=pane, l=labels: self.api.report(p, l))
+        for ws in self.spaces:
+            text = space_icon(ws, by_space.get(ws, set()), now, settings, run_interval, sleep_interval)
+            self.send(("space", ws), text, now, lambda w=ws, t=text: self.api.report_space(w, t))
+
+    def send(self, key, value, now, action):
+        previous = self.sent.get(key)
+        if previous and previous[0] == value and now - previous[1] < REFRESH_SEC:
+            return
+        try:
+            action()
+        except NotFound:
+            self.sent.pop(key, None)
+            return
+        # Failed writes never enter the cache. Other errors reach the caller.
+        self.sent[key] = (value, now)
+
+
+def clear_all(api):
+    for pane in api.panes() | set(api.agents()):
+        try:
+            api.clear(pane)
+        except NotFound:
+            pass
+    for ws in api.workspaces():
+        try:
+            api.clear_space(ws)
+        except NotFound:
+            pass
+
+
+def run(stop, notify=lambda message: None):
+    instance = Instance()
+    events = None
+    try:
+        if not instance.acquire():
+            raise RuntimeError("Already running for this server. Use --settings to change settings.")
+        instance.stop_path.unlink(missing_ok=True)
+        effective_intervals(read_settings())  # Validate environment overrides before connecting.
+        api = Api()
+        events = Events(api.path)  # Subscribe before the initial scan.
+        renderer = Renderer(api)
+        scan_at, dirty = 0, True
+        notify("Running")
+        while not stop.is_set() and not instance.stop_path.exists():
+            now = time.monotonic()
+            if dirty or now >= scan_at:
+                renderer.scan()
+                scan_at, dirty = now + SCAN_SEC, False
+            settings = read_settings()
+            run_interval, sleep_interval = effective_intervals(settings)
+            renderer.render(now, settings, run_interval, sleep_interval)
+            # No per-frame API reads. A 2s reconciliation covers status changes;
+            # lifecycle events trigger an earlier scan. Stop/settings latency <= .25s.
+            dirty = events.wait(min(run_interval, sleep_interval, 0.25))
+        clear_all(api)
+    finally:
+        if events:
+            events.close()
+        instance.close()
+
+
+def adjust_setting(settings, key, direction):
+    updated = dict(settings)
+    if key in TOGGLES:
+        updated[key] = not updated[key]
+    elif key == "theme":
+        updated[key] = "light" if updated[key] == "dark" else "dark"
+    else:
+        current = updated[key]
+        choices = [v for v in SPEEDS if v > current] if direction > 0 else [v for v in SPEEDS if v < current]
+        updated[key] = (min(choices) if direction > 0 else max(choices)) if choices else current
+    return updated
+
+
+def ui_theme(stdscr, theme):
+    """Use basic terminal colors; never change the terminal's global palette."""
+    try:
+        if curses.has_colors():
+            curses.start_color()
+            fg, bg = (curses.COLOR_BLACK, curses.COLOR_WHITE) if theme == "light" else (curses.COLOR_WHITE, curses.COLOR_BLACK)
+            curses.init_pair(1, fg, bg)
+            stdscr.bkgd(' ', curses.color_pair(1))
+    except curses.error:
+        pass
+
+
+def settings_ui(stdscr, stop, status):
+    settings = read_settings()
+    selected = 0
+    keys = list(DEFAULTS)
+    names = ["All animations", "Running dog", "Sleeping dog (z / zZ)",
+             "Running frame", "Sleeping frame", "Color theme"]
+    stdscr.timeout(200)
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    notice = "Changes are saved immediately."
+    while not stop.is_set():
+        ui_theme(stdscr, settings["theme"])
+        stdscr.erase()
+        lines = ["Herdr Doxie", "", status[0], ""]
+        for i, key in enumerate(keys):
+            value = settings[key]
+            if key in TOGGLES:
+                display = "ON" if value else "OFF"
+            elif key.endswith("_interval"):
+                display = f"{value:g} s / frame"
+            else:
+                display = value.capitalize()
+            suffix = " (paused)" if key in ("running", "sleeping") and not settings["animate"] else ""
+            override = {"run_interval": "HERDR_DOXIE_INTERVAL", "sleep_interval": "HERDR_DOXIE_SLEEP_INTERVAL"}.get(key)
+            if (override and override in os.environ) or (key == "animate" and os.environ.get("HERDR_DOXIE_ANIMATE") == "0"):
+                suffix += " (environment override)"
+            lines.append(f"{'>' if selected == i else ' '} {names[i]}: {display}{suffix}")
+        lines += ["", "Up/Down: select   Left/Right: change", "Space/Enter: toggle or increase frame duration",
+                  "Shorter frame duration = faster animation.", "q: close (panel also stops the dog)", "", notice]
+        overrides = [k for k in ("HERDR_DOXIE_INTERVAL", "HERDR_DOXIE_SLEEP_INTERVAL") if k in os.environ]
+        if os.environ.get("HERDR_DOXIE_ANIMATE") == "0":
+            overrides.append("HERDR_DOXIE_ANIMATE")
+        if overrides:
+            lines += ["Environment overrides: " + ", ".join(overrides),
+                      "Saved preferences apply after removing overrides and restarting."]
+        height, width = stdscr.getmaxyx()
+        # Keep the selected row and controls visible in a short popup.
+        if height < len(lines) + 1:
+            lines = ["Herdr Doxie", lines[4 + selected], "Up/Down: select; Left/Right: change; q: close", notice]
+        for y, line in enumerate(lines[:max(0, height - 1)]):
+            try:
+                stdscr.addnstr(y, 0, line, max(0, width - 1))
+            except curses.error:
+                pass
+        stdscr.refresh()
+        key = stdscr.getch()
+        if key in (ord('q'), 27):
+            break
+        if key in (curses.KEY_UP, ord('k')):
+            selected = (selected - 1) % len(keys)
+        if key in (curses.KEY_DOWN, ord('j')):
+            selected = (selected + 1) % len(keys)
+        if key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord('h'), ord('l'), ord(' '), 10, 13, curses.KEY_ENTER):
+            try:
+                direction = -1 if key in (curses.KEY_LEFT, ord('h')) else 1
+                updated = adjust_setting(read_settings(), keys[selected], direction)
+                save_settings(updated)
+                settings = updated
+                notice = "Saved."
+            except (OSError, ValueError) as error:
+                notice = f"Could not save: {error}"
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--panel', action='store_true', help='run icons and settings in a managed terminal pane')
+    group.add_argument('--settings', action='store_true', help='edit saved settings without starting a runner')
+    group.add_argument('--once', action='store_true', help='register static icons, expiring after 60 seconds')
+    group.add_argument('--clear', action='store_true', help='stop this server runner, then clear icons')
+    group.add_argument('--stop', action='store_true', help='stop this server runner')
+    group.add_argument('--daemon', action='store_true', help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    if args.daemon:
+        parser.error('--daemon was removed. Remove the old .zshrc hook and use the plugin control pane.')
+    stop = threading.Event()
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, lambda *_: stop.set())
+    if args.clear or args.stop or args.once:
+        instance = Instance()
+        try:
+            instance.stop_and_acquire()
+            if args.clear:
+                clear_all(Api())
+            elif args.once:
+                renderer = Renderer(Api())
+                renderer.scan()
+                renderer.render(time.monotonic(), {**read_settings(), "animate": False}, .25, .7)
+        finally:
+            instance.close()
+        return
+    if args.panel or args.settings:
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            raise RuntimeError('Settings require an interactive terminal')
+        status = ["Settings only; existing runners pick up changes."]
+        errors = []
+        def worker():
+            try:
+                run(stop, lambda text: status.__setitem__(0, text))
+            except Exception as error:
+                errors.append(error)
+            finally:
+                stop.set()
+        thread = threading.Thread(target=worker) if args.panel else None
+        if thread:
+            thread.start()
+        try:
+            curses.wrapper(settings_ui, stop, status)
+        finally:
+            stop.set()
+            if thread:
+                thread.join()
+        if errors:
+            raise errors[0]
+    else:
+        run(stop, print)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, RuntimeError, curses.error) as error:
+        print(f"herdr-doxie: {error}", file=sys.stderr)
+        sys.exit(1)

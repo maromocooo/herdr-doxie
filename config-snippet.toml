@@ -1,0 +1,20 @@
+# Merge into existing tables; do not append duplicate TOML tables.
+# Preserve other tokens in your custom rows. Add the rules to state_text and $doxie.
+# Herdr allows at most 16 rules per token. Agents omit the empty house; Spaces
+# omit the done house because done is aggregated as idle. Keep this limit.
+# Both palettes are required for the TUI theme switch (font version 1.040+).
+# Dark: pastel colors. Light: darker colors for contrast on a light background.
+# This plugin never rewrites your Herdr configuration automatically.
+# 既存の行は保持し、state_text と $doxie に両配色の rules を追加してください。
+
+[ui.sidebar.agents]
+rows = [
+  [{ token = "state_text", rules = [{ contains = "\U0010F000", fg = "#f9e2af" }, { contains = "\U0010F002", fg = "#f9e2af" }, { contains = "\U0010F004", fg = "#f9e2af" }, { contains = "\U0010F006", fg = "#f38ba8" }, { contains = "\U0010F008", fg = "#89b4fa" }, { contains = "\U0010F00A", fg = "#a6e3a1" }, { contains = "\U0010F00C", fg = "#a6e3a1" }, { contains = "\U0010F00E", fg = "#a6e3a1" }, { contains = "\U0010F020", fg = "#854d0e" }, { contains = "\U0010F022", fg = "#854d0e" }, { contains = "\U0010F024", fg = "#854d0e" }, { contains = "\U0010F026", fg = "#b91c1c" }, { contains = "\U0010F028", fg = "#1d4ed8" }, { contains = "\U0010F02A", fg = "#166534" }, { contains = "\U0010F02C", fg = "#166534" }, { contains = "\U0010F02E", fg = "#166534" }] }, "machine", "workspace", "tab"],
+  ["agent"],
+]
+
+[ui.sidebar.spaces]
+rows = [
+  [{ token = "$doxie", rules = [{ contains = "\U0010F000", fg = "#f9e2af" }, { contains = "\U0010F002", fg = "#f9e2af" }, { contains = "\U0010F004", fg = "#f9e2af" }, { contains = "\U0010F006", fg = "#f38ba8" }, { contains = "\U0010F00A", fg = "#a6e3a1" }, { contains = "\U0010F00C", fg = "#a6e3a1" }, { contains = "\U0010F00E", fg = "#a6e3a1" }, { contains = "\U0010F010", fg = "#9399b2" }, { contains = "\U0010F020", fg = "#854d0e" }, { contains = "\U0010F022", fg = "#854d0e" }, { contains = "\U0010F024", fg = "#854d0e" }, { contains = "\U0010F026", fg = "#b91c1c" }, { contains = "\U0010F02A", fg = "#166534" }, { contains = "\U0010F02C", fg = "#166534" }, { contains = "\U0010F02E", fg = "#166534" }, { contains = "\U0010F030", fg = "#475569" }] }, "workspace"],
+  ["branch", "git_status"],
+]
